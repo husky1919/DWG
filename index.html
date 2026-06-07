@@ -1,141 +1,187 @@
 <!DOCTYPE html>
-<html>
+<html lang="zh-CN">
 <head>
-    <meta charset="UTF-8">
-    <title>文件浏览器</title>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>DWG 视频浏览器</title>
+  <style>
+    body{font-family:system-ui,Segoe UI,Arial;max-width:1000px;margin:24px auto;padding:0 16px;color:#111}
+    h1{margin-bottom:8px}
+    ul{list-style:none;padding-left:0}
+    li{margin:6px 0;padding:8px;border:1px solid #eee;border-radius:6px;display:flex;align-items:center;gap:12px}
+    .folder{font-weight:600}
+    button{padding:6px 10px;border-radius:6px;border:1px solid #ccc;background:#f7f7f7;cursor:pointer}
+    .player{margin-top:18px}
+    .path{color:#555;font-size:13px}
+  </style>
 </head>
 <body>
-    <button id="backBtn" style="display:none;">返回上级</button>
-    <span id="currentPath">/</span>
-    <input type="text" id="filter" placeholder="筛选" autocomplete="off">
-    <div id="fileList" style="margin-top:8px;"></div>
+  <h1>DWG - 仓库视频浏览器</h1>
+  <p id="info">正在读取仓库...</p>
+  <div>
+    查找路径：
+    <input id="pathInput" placeholder="留空表示仓库根目录（例如 videos ）" style="width:240px;padding:6px;margin-left:8px"/>
+    <button id="reloadBtn">读取并显示</button>
+  </div>
 
-    <script>
-        (function() {
-            const REPO_OWNER = 'DWG';
-            const REPO_NAME = 'husky1919.github.io';
-            const BRANCH = 'main';
-            const HTML_BASE = `https://githubraw.com/${REPO_OWNER}/${REPO_NAME}/${BRANCH}/`;
-            const SITE_BASE = `https://${REPO_OWNER}.github.io/`;
+  <ul id="list"></ul>
 
-            let allItems = [];
-            let currentPath = '';
-            let currentEntries = [];
+  <div class="player" id="playerArea" style="display:none">
+    <h3 id="nowPlaying">正在播放：</h3>
+    <video id="videoPlayer" controls style="width:100%;max-height:70vh;background:#000"></video>
+    <p class="path" id="filePath"></p>
+  </div>
 
-            const fileListDiv = document.getElementById('fileList');
-            const backBtn = document.getElementById('backBtn');
-            const pathSpan = document.getElementById('currentPath');
-            const filterInput = document.getElementById('filter');
+  <script>
+    const owner = 'husky1919';
+    const repo = 'DWG';
+    const ref = 'main'; // 如需改分支可改这里
+    // 如果仓库是私有或你想提高速率限制，设置 token（注意不要在公共页面公开 token）
+    const GITHUB_TOKEN = null; // e.g. 'ghp_xxx' —— 若公开放在 Pages 切勿填写
 
-            async function loadTree() {
-                fileListDiv.textContent = '加载中…';
-                try {
-                    const res = await fetch(`https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}/git/trees/${BRANCH}?recursive=1`);
-                    if (!res.ok) throw new Error('HTTP ' + res.status);
-                    const data = await res.json();
-                    allItems = data.tree.filter(item => {
-                        const name = item.path.split('/').pop();
-                        return item.path !== 'index.html' && !name.startsWith('biliplus');
-                    });
-                    navigateTo('');
-                } catch (err) {
-                    fileListDiv.textContent = '加载失败：' + err.message;
-                }
+    const videoExts = ['.mp4','.webm','.ogg','.mov','.m4v','.mpg','.mpeg','.ogv'];
+
+    const listEl = document.getElementById('list');
+    const infoEl = document.getElementById('info');
+    const playerArea = document.getElementById('playerArea');
+    const videoPlayer = document.getElementById('videoPlayer');
+    const nowPlaying = document.getElementById('nowPlaying');
+    const filePathEl = document.getElementById('filePath');
+    const pathInput = document.getElementById('pathInput');
+    const reloadBtn = document.getElementById('reloadBtn');
+
+    reloadBtn.addEventListener('click', ()=> {
+      loadAndRender(pathInput.value.trim());
+    });
+
+    async function apiFetch(path) {
+      const url = `https://api.github.com/repos/${owner}/${repo}/contents/${encodeURIComponent(path)}?ref=${encodeURIComponent(ref)}`;
+      const headers = { Accept: 'application/vnd.github.v3+json' };
+      if (GITHUB_TOKEN) headers.Authorization = 'token ' + GITHUB_TOKEN;
+      const res = await fetch(url, { headers });
+      if (!res.ok) throw new Error('GitHub API 错误: ' + res.status + ' ' + res.statusText);
+      return res.json();
+    }
+
+    function isVideo(name) {
+      const lower = name.toLowerCase();
+      return videoExts.some(ext => lower.endsWith(ext));
+    }
+
+    async function listContentsRec(path, parentUl) {
+      let items;
+      try {
+        items = await apiFetch(path === '' ? '' : path);
+      } catch (e) {
+        const li = document.createElement('li');
+        li.textContent = '读取失败: ' + e.message;
+        parentUl.appendChild(li);
+        return;
+      }
+      // items can be a file object or array for directory
+      if (!Array.isArray(items)) {
+        // single file
+        if (items.type === 'file' && isVideo(items.name)) {
+          appendFileItem(items, parentUl, path || '');
+        }
+        return;
+      }
+
+      // sort: folders first
+      items.sort((a,b)=> (a.type===b.type? a.name.localeCompare(b.name) : a.type==='dir'? -1:1));
+
+      for (const item of items) {
+        if (item.type === 'dir') {
+          const li = document.createElement('li');
+          li.className = 'folder';
+          const btn = document.createElement('button');
+          btn.textContent = '展开';
+          btn.addEventListener('click', async () => {
+            if (btn.dataset.expanded === '1') {
+              // collapse
+              btn.dataset.expanded = '0';
+              btn.textContent = '展开';
+              if (li.querySelector('ul')) li.removeChild(li.querySelector('ul'));
+            } else {
+              btn.dataset.expanded = '1';
+              btn.textContent = '收起';
+              const childUl = document.createElement('ul');
+              childUl.style.marginTop = '8px';
+              childUl.style.marginLeft = '12px';
+              li.appendChild(childUl);
+              await listContentsRec(item.path, childUl);
             }
+          });
+          li.appendChild(btn);
+          const span = document.createElement('span');
+          span.textContent = ' / ' + item.name;
+          li.appendChild(span);
+          parentUl.appendChild(li);
+        } else if (item.type === 'file') {
+          if (isVideo(item.name)) appendFileItem(item, parentUl);
+        }
+      }
+    }
 
-            function navigateTo(path) {
-                currentPath = path;
-                pathSpan.textContent = path === '' ? '/' : '/' + path + '/';
-                backBtn.style.display = path === '' ? 'none' : 'inline-block';
+    function appendFileItem(item, parentUl) {
+      const li = document.createElement('li');
+      const nameSpan = document.createElement('span');
+      nameSpan.textContent = item.name;
+      nameSpan.style.flex = '1';
+      li.appendChild(nameSpan);
 
-                const map = new Map();
-                for (const item of allItems) {
-                    const full = item.path;
-                    if (path !== '' && !full.startsWith(path + '/')) continue;
-                    let relative = path === '' ? full : full.substring(path.length + 1);
+      const playBtn = document.createElement('button');
+      playBtn.textContent = '播放';
+      playBtn.addEventListener('click', ()=> {
+        playFile(item);
+      });
+      li.appendChild(playBtn);
 
-                    if (relative.includes('/')) {
-                        const dirName = relative.split('/')[0];
-                        // 文件夹：直接设置（覆盖可能已有的同名文件条目）
-                        map.set(dirName, {
-                            type: 'dir',
-                            name: dirName,
-                            fullPath: path === '' ? dirName : path + '/' + dirName
-                        });
-                    } else {
-                        // 文件：只有当前没有同名文件夹时才添加
-                        const existing = map.get(relative);
-                        if (!existing || existing.type !== 'dir') {
-                            map.set(relative, {
-                                type: 'file',
-                                name: relative,
-                                fullPath: full,
-                                rawUrl: (['html','htm'].includes(relative.split('.').pop().toLowerCase()) ? HTML_BASE : SITE_BASE) + full.split('/').map(encodeURIComponent).join('/')
-                            });
-                        }
-                    }
-                }
+      const openBtn = document.createElement('button');
+      openBtn.textContent = '在新标签打开';
+      openBtn.addEventListener('click', ()=> {
+        // download_url points to raw.githubusercontent.com
+        const url = item.download_url || `https://raw.githubusercontent.com/${owner}/${repo}/${ref}/${item.path}`;
+        window.open(url, '_blank');
+      });
+      li.appendChild(openBtn);
 
-                currentEntries = Array.from(map.values()).sort((a, b) => {
-                    if (a.type !== b.type) return a.type === 'dir' ? -1 : 1;
-                    return a.name.localeCompare(b.name);
-                });
-                render();
-            }
+      const small = document.createElement('div');
+      small.className = 'path';
+      small.textContent = item.path;
+      small.style.marginTop = '6px';
+      small.style.gridColumn = '1/-1';
+      li.appendChild(small);
 
-            function render() {
-                if (currentEntries.length === 0) {
-                    fileListDiv.textContent = '此文件夹为空';
-                    return;
-                }
-                fileListDiv.innerHTML = '';
-                for (const entry of currentEntries) {
-                    const div = document.createElement('div');
-                    if (entry.type === 'dir') {
-                        div.style.cursor = 'pointer';
-                        div.style.color = 'blue';
-                        div.style.textDecoration = 'underline';
-                        div.textContent = entry.name;
-                        div.addEventListener('click', function(e) {
-                            e.preventDefault();
-                            e.stopPropagation();
-                            navigateTo(entry.fullPath);
-                        });
-                    } else {
-                        const a = document.createElement('a');
-                        a.href = entry.rawUrl;
-                        a.target = '_blank';
-                        a.rel = 'noopener noreferrer';
-                        a.textContent = entry.name;
-                        div.appendChild(a);
-                    }
-                    fileListDiv.appendChild(div);
-                }
-                applyFilter();
-            }
+      parentUl.appendChild(li);
+    }
 
-            function applyFilter() {
-                const keyword = filterInput.value.trim().toLowerCase();
-                Array.from(fileListDiv.children).forEach(div => {
-                    const text = (div.textContent || '').toLowerCase();
-                    div.style.display = (keyword === '' || text.includes(keyword)) ? '' : 'none';
-                });
-            }
+    function playFile(item) {
+      const url = item.download_url || `https://raw.githubusercontent.com/${owner}/${repo}/${ref}/${item.path}`;
+      videoPlayer.src = url;
+      nowPlaying.textContent = '正在播放：' + item.name;
+      filePathEl.textContent = item.path;
+      playerArea.style.display = 'block';
+      videoPlayer.play().catch(()=>{});
+      // 滚动到播放器
+      playerArea.scrollIntoView({behavior:'smooth'});
+    }
 
-            backBtn.addEventListener('click', () => {
-                if (currentPath === '') return;
-                const lastSlash = currentPath.lastIndexOf('/');
-                navigateTo(lastSlash === -1 ? '' : currentPath.substring(0, lastSlash));
-            });
+    async function loadAndRender(startPath='') {
+      listEl.innerHTML = '';
+      infoEl.textContent = '读取仓库...';
+      playerArea.style.display = 'none';
+      try {
+        await listContentsRec(startPath, listEl);
+        infoEl.textContent = '完成。点击播放或在新标签打开原始文件。';
+      } catch (e) {
+        infoEl.textContent = '发生错误：' + e.message;
+      }
+    }
 
-            let timer;
-            filterInput.addEventListener('input', () => {
-                clearTimeout(timer);
-                timer = setTimeout(applyFilter, 150);
-            });
+    // 首次加载根目录
+    loadAndRender('');
 
-            loadTree();
-        })();
-    </script>
+  </script>
 </body>
 </html>
